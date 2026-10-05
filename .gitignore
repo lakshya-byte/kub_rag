@@ -1,0 +1,41 @@
+# ── Secrets (never commit) ──────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Python ──────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ── Generated / local data ──────────────────────────────
+processed_data/
+.flashrank/
+# Uncomment if the corpus is large or shouldn't be shared:
+# DATA/
+
+# ── Node / Next.js (frontend/) ──────────────────────────
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+*.tsbuildinfo
+npm-debug.log*
+
+# ── Logs & tooling ──────────────────────────────────────
+*.log
+.logfire/
+.streamlit/secrets.toml
+
+# ── OS / editor ─────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
