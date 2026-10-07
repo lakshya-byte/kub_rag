@@ -1,6 +1,13 @@
 import logfire
 from app.agents.state import AgentState
+from app.agents.nodes.planner import format_history
 from app.gateway import portkey_client, extract_cache_status
+from app.guardrails.classifier import RESPONSES, OFF_TOPIC
+
+NO_CONTEXT_ANSWER = (
+    "I couldn't find anything relevant in the documentation for that question. "
+    "Try rephrasing it, or ask about a topic covered by the knowledge base."
+)
 
 
 def generate_node(state: AgentState):
@@ -11,12 +18,19 @@ def generate_node(state: AgentState):
     """
     query = state["current_query"]
 
-    history_str = ""
-    for msg in state["messages"][:-1]:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        history_str += f"{role}: {msg['content']}\n"
+    history_str = format_history(state["messages"])
 
     user_msg = state["messages"][-1]["content"] if state["messages"] else ""
+
+    if query == "OFF_TOPIC":
+        # Safety net behind the guardrail gate: refuse without retrieval or an LLM call.
+        answer = RESPONSES[OFF_TOPIC]
+        return {
+            "final_answer": answer,
+            "status": "Off-topic request.",
+            "plan": state["plan"],
+            "messages": [{"role": "assistant", "content": answer}],
+        }
 
     if query == "CONVERSATIONAL":
         logfire.info("Generating conversational response using memory.")
@@ -31,6 +45,16 @@ def generate_node(state: AgentState):
         "{user_msg}"
         """
     else:
+        if not state.get("documents"):
+            # Nothing relevant was retrieved: say so instead of letting the LLM improvise.
+            logfire.warning("No relevant context retrieved — returning an honest 'not found' answer.")
+            return {
+                "final_answer": NO_CONTEXT_ANSWER,
+                "status": "No relevant context found.",
+                "plan": state["plan"],
+                "messages": [{"role": "assistant", "content": NO_CONTEXT_ANSWER}],
+            }
+
         logfire.info("Generating technical RAG response.")
         max_context_chars = 25000
         full_context = ""
@@ -45,10 +69,13 @@ def generate_node(state: AgentState):
 
         prompt = f"""
         You are a Senior Technical Architect.
-        Answer the question using the TECHNICAL CONTEXT provided.
+        Answer the question using ONLY the TECHNICAL CONTEXT provided. Do not use outside knowledge.
+        If the context does not actually answer the question (for example it is unrelated or only
+        fragments), say you could not find that in the documentation instead of guessing.
         Each context passage is numbered like [1], [2]. Cite the passages you rely on
-        inline using those same bracket numbers (e.g. "...uses a CNI plugin [2]."). Only
-        cite numbers that exist, and do not add a separate references list.
+        inline using footnote-style markers [^1], [^2] that match those numbers
+        (e.g. "...uses a CNI plugin [^2]."). Only cite numbers that exist, and do not add
+        a separate references list.
 
         TECHNICAL CONTEXT:
         {full_context}

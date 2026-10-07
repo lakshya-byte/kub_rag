@@ -7,6 +7,8 @@ Reuses parse_text, parse_html, and chunk_text from the main app.
 import os
 import sys
 
+import logfire
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import docx as python_docx
@@ -16,8 +18,8 @@ from app.ingestion.loaders.text import parse_text
 from app.ingestion.loaders.html import parse_html
 from app.ingestion.chunking.splitter import chunk_text
 
-TRUE_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "true_data")
-NOISY_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "noisy_data")
+TRUE_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "DATA", "true_data")
+NOISY_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "DATA", "noisy_data")
 NOISY_ALLOWED_EXTS = {".pptx", ".docx", ".txt"}
 
 
@@ -47,8 +49,9 @@ def parse_file(file_path: str) -> str:
             return parse_text(file_path)
         elif ext in (".html", ".htm"):
             return parse_html(file_path)
-    except Exception:
-        pass
+    except Exception as e:
+        # Never hide a bad file: log which one failed and why.
+        logfire.error(f"Parse failed for {file_path}: {e}")
     return ""
 
 

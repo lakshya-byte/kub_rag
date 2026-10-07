@@ -2,13 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowDown, Command as CommandIcon, MessageSquare, PanelLeft, Plus, Workflow, Moon, Sparkles } from "lucide-react";
+import { ArrowDown, BookOpen, Command as CommandIcon, MessageSquare, PanelLeft, Plus, Workflow, Moon, Sparkles } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { sendQuery } from "@/lib/api";
 import { chatStore, uid, useChatStore } from "@/lib/store";
 import { toggleTheme } from "@/lib/theme";
 import { toast } from "@/lib/toast";
 import type { ChatMessage, Feedback } from "@/lib/types";
 import EmptyState from "./EmptyState";
+import WaveBackground from "@/components/WaveBackground";
 import MessageView from "./Message";
 import Pipeline from "./Pipeline";
 import Composer, { type ComposerHandle } from "./Composer";
@@ -17,6 +20,20 @@ import Sidebar from "./Sidebar";
 import CommandPalette, { type Command } from "./CommandPalette";
 import ThemeToggle from "./ThemeToggle";
 import Toaster from "./Toaster";
+
+/**
+ * How many messages the server should hold for a chat: everything the UI shows except
+ * failed turns (an error reply and the user message that caused it).
+ */
+function serverMessageCount(messages: ChatMessage[]): number {
+  let n = 0;
+  messages.forEach((m, i) => {
+    if (m.role === "assistant" && m.error) return;
+    if (m.role === "user" && messages[i + 1]?.error) return;
+    n += 1;
+  });
+  return n;
+}
 
 const SUGGESTED = [
   "How does Kubernetes handle pod networking?",
@@ -27,6 +44,7 @@ const SUGGESTED = [
 export default function Chat() {
   const { hydrated, conversations, activeId } = useChatStore();
   const active = conversations.find((c) => c.id === activeId) ?? null;
+  const router = useRouter();
   const messages = useMemo(() => active?.messages ?? [], [active]);
 
   const [loadingIds, setLoadingIds] = useState<string[]>([]);
@@ -75,6 +93,11 @@ export default function Chat() {
       const convId = opts?.convId ?? chatStore.state().activeId ?? chatStore.create();
       if (controllers.current.has(convId)) return;
 
+      // Messages the server should already know about, i.e. everything before this question.
+      const existing = chatStore.state().conversations.find((c) => c.id === convId)?.messages ?? [];
+      const prior = opts?.skipUser ? existing.slice(0, -1) : existing;
+      const keepMessages = serverMessageCount(prior);
+
       if (!opts?.skipUser) chatStore.append(convId, { id: uid(), role: "user", content: q });
       stick.current = true;
 
@@ -85,7 +108,7 @@ export default function Chat() {
       const threadId = chatStore.state().conversations.find((c) => c.id === convId)?.threadId ?? uid();
 
       try {
-        const data = await sendQuery(q, threadId, controller.signal);
+        const data = await sendQuery(q, threadId, controller.signal, keepMessages);
         const failed = data.status === "error";
         chatStore.append(convId, {
           id: uid(),
@@ -94,6 +117,7 @@ export default function Chat() {
           thought: data.thought_process ?? [],
           status: data.status ?? undefined,
           sources: data.sources ?? [],
+          sourceMeta: data.source_meta ?? [],
           error: failed,
           fresh: !failed,
           question: q,
@@ -184,6 +208,7 @@ export default function Chat() {
       { id: "sidebar", label: "Toggle sidebar", group: "Actions", hint: "⌘B", icon: PanelLeft, run: toggleSidebar },
       { id: "theme", label: "Toggle light / dark theme", group: "Actions", icon: Moon, run: toggleTheme },
       { id: "graph", label: "Show agent workflow", group: "Actions", icon: Workflow, run: () => setGraphOpen(true) },
+      { id: "docs", label: "Open documentation", group: "Actions", icon: BookOpen, run: () => router.push("/docs") },
     ];
     const prompts: Command[] = SUGGESTED.map((p, i) => ({
       id: `prompt-${i}`,
@@ -205,7 +230,7 @@ export default function Chat() {
         run: () => chatStore.select(c.id),
       }));
     return [...base, ...chats, ...prompts];
-  }, [conversations, newChat, toggleSidebar, ask]);
+  }, [conversations, newChat, toggleSidebar, ask, router]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -239,6 +264,7 @@ export default function Chat() {
         <i />
         <i />
       </div>
+      <WaveBackground active={empty} />
 
       <Sidebar
         open={sidebarOpen}
@@ -278,6 +304,13 @@ export default function Chat() {
           >
             <Workflow size={16} />
           </button>
+          <Link
+            href="/docs"
+            aria-label="Open documentation"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-ink-soft transition hover:bg-line/60 hover:text-ink"
+          >
+            <BookOpen size={16} />
+          </Link>
           <button
             onClick={newChat}
             aria-label="New chat"

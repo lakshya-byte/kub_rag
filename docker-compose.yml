@@ -1,0 +1,34 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports: ["8000:8000"]
+    volumes:
+      - chat_data:/data
+      - flashrank_cache:/tmp/flashrank
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports: ["3000:3000"]
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # One-off job, never started by `docker compose up`:
+  #   docker compose --profile tools run --rm ingest            (add --wipe yourself if you want it)
+  ingest:
+    build: .
+    profiles: ["tools"]
+    env_file: .env
+    volumes:
+      - ./DATA:/srv/DATA:ro
+    entrypoint: ["python", "-m", "app.ingestion.processors"]
+
+volumes:
+  chat_data:
+  flashrank_cache:

@@ -15,6 +15,10 @@ def search_enterprise_knowledge(query: str, limit: int = 8):
     """
     Performs a high-precision search in the enterprise knowledge base.
     Uses the modern query_points interface.
+
+    Returns an empty list only when the search worked but nothing scored above
+    RETRIEVAL_MIN_SCORE. Infrastructure failures (bad key, Qdrant down, embedding
+    error) are logged and re-raised so they are never mistaken for "no results".
     """
     try:
         query_vector = embed_query(query)
@@ -24,6 +28,7 @@ def search_enterprise_knowledge(query: str, limit: int = 8):
             collection_name=settings.QDRANT_COLLECTION_NAME,
             query=query_vector,
             limit=limit,
+            score_threshold=settings.RETRIEVAL_MIN_SCORE,
             with_payload=True # JSON
         )
 
@@ -34,8 +39,8 @@ def search_enterprise_knowledge(query: str, limit: int = 8):
                 "source": res.payload.get("source", "Unknown"),
                 "score": res.score
             })
-        
+
         return results
     except Exception as e:
         logfire.error(f"❌ Qdrant Search Failed: {e}")
-        return []
+        raise

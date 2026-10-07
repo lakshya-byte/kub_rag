@@ -14,18 +14,39 @@ const listeners = new Set<() => void>();
 
 export const uid = () => crypto.randomUUID();
 
-function persist() {
-  try {
-    const conversations = state.conversations.map((c) => ({
+const MAX_STORED_CHATS = 50;     // unpinned chats kept (pinned chats are always kept)
+const CHATS_WITH_SOURCES = 10;   // newest chats that keep their (large) source text
+
+/** Build the copy that is written to localStorage: capped in size, never the in-memory state. */
+function snapshot(maxChats: number, withSources: number): Conversation[] {
+  const byRecent = [...state.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+  const unpinned = byRecent.filter((c) => !c.pinned).slice(0, maxChats);
+  const keepIds = new Set([...byRecent.filter((c) => c.pinned), ...unpinned].map((c) => c.id));
+  const recentIds = new Set(byRecent.slice(0, withSources).map((c) => c.id));
+
+  return state.conversations
+    .filter((c) => keepIds.has(c.id))
+    .map((c) => ({
       ...c,
-      // `fresh` is transient: never replay the typewriter after a reload
-      messages: c.messages.map(({ fresh: _fresh, ...m }) => {
+      messages: c.messages.map(({ fresh: _fresh, sources, sourceMeta, ...m }) => {
         void _fresh;
-        return m;
+        // Sources are the bulkiest part of a chat: keep them only for the newest chats.
+        return recentIds.has(c.id) ? { ...m, sources, sourceMeta } : m;
       }),
     }));
+}
+
+function persist() {
+  const write = (conversations: Conversation[]) =>
     localStorage.setItem(KEY, JSON.stringify({ conversations, activeId: state.activeId }));
-  } catch {}
+  try {
+    write(snapshot(MAX_STORED_CHATS, CHATS_WITH_SOURCES));
+  } catch {
+    // Most likely the ~5 MB quota: retry with a much smaller footprint.
+    try {
+      write(snapshot(20, 0));
+    } catch {}
+  }
 }
 
 function init() {

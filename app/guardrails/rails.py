@@ -1,63 +1,32 @@
 import logfire
-from langchain_groq import ChatGroq
-from nemoguardrails import RailsConfig, LLMRails
 
 from app.config import settings
-from app.guardrails.colang_rules import COLANG_CONTENT, YAML_CONTENT, RAIL_INDICATORS
-
-
-_rails: LLMRails | None = None
+from app.guardrails.classifier import PASS, RESPONSES, classify
 
 
 def initialize_rails() -> None:
     """
-    Build the NeMo LLMRails singleton at app startup.
-    Uses llama-3.1-8b-instant for fast intent classification at the gate —
-    the heavier llama-3.3-70b-versatile is reserved for the RAG pipeline.
+    Startup hook (kept so the API lifespan doesn't change). The classifier client is created lazily
+    on first use, so there is nothing heavy to load here any more (NeMo's embedding index is gone).
     """
-    global _rails
-
-    guard_llm = ChatGroq(
-        api_key=settings.GROQ_API_KEY,
-        model="llama-3.1-8b-instant",
-        temperature=0
-    )
-
-    config = RailsConfig.from_content(
-        colang_content=COLANG_CONTENT,
-        yaml_content=YAML_CONTENT
-    )
-
-    _rails = LLMRails(config, llm=guard_llm)
-    logfire.info("🛡️ NeMo Guardrails initialised (llama-3.1-8b-instant).")
-    
-    
+    logfire.info(f"🛡️ Guardrail classifier ready ({settings.GUARDRAILS_MODEL}).")
 
 
 def guard(message: str) -> tuple[bool, str | None]:
     """
-    Run a user message through the NeMo rails gate.
+    Run a user message through the guardrail gate.
 
     Returns:
-        (True,  rail_response) — a rail fired; return this response immediately,
-                                skip the RAG pipeline entirely.
-        (False, None)          — message is clean; proceed to LangGraph.
+        (True,  reply) — the message was refused or answered by a rail; return `reply` immediately
+                         and skip the RAG pipeline entirely.
+        (False, None)  — the message is a normal technical request; proceed to LangGraph.
     """
-    if _rails is None:
-        logfire.warning("⚠️ Guardrails not initialised — skipping gate.")
-        return False, None
-
     with logfire.span("🛡️ Guardrails Check"):
-        result = _rails.generate(messages=[{"role": "user", "content": message}])
+        label = classify(message)
 
-        # NeMo returns {'role': 'assistant', 'content': '...'} — extract text
-        content = result.get("content", "") if isinstance(result, dict) else str(result)
+        if label == PASS:
+            logfire.info("✅ Guardrails passed.")
+            return False, None
 
-        fired = any(indicator in content for indicator in RAIL_INDICATORS)
-
-        if fired:
-            logfire.info(f"🛡️ Guardrails fired | query='{message[:80]}'")
-            return True, content
-
-        logfire.info("✅ Guardrails passed.")
-        return False, None
+        logfire.info(f"🛡️ Guardrails fired | label={label} | query='{message[:80]}'")
+        return True, RESPONSES[label]

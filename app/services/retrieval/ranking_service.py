@@ -8,12 +8,13 @@ _ranker = None
 
 def _get_ranker() -> Ranker:
     """
-    Initializes the FlashRank engine lazily. 
-    FlashRank uses a local ONNX model (ms-marco-MiniLM-L-6-v2) for ultra-fast reranking.
+    Initializes the FlashRank engine lazily.
+    FlashRank runs a small quantized ONNX cross-encoder locally (its default model,
+    currently ms-marco-TinyBERT-L-2-v2) for fast reranking.
     """
     global _ranker
     if _ranker is None:
-        logfire.info("🧠 Initializing FlashRank Model (TinyBERT) locally...")
+        logfire.info("🧠 Initializing FlashRank (default model) locally...")
         try:
             # We use a specific cache directory to avoid permission issues in production
             _ranker = Ranker(cache_dir="/tmp/flashrank")
@@ -65,3 +66,30 @@ def rerank_documents(query: str, documents: list[str], top_n: int = 5) -> list[s
         logfire.error(f"❌ [Reranker] Semantic Reranking Failed: {e}")
         # Fallback to the original Qdrant order to ensure the user still gets an answer
         return documents[:top_n]
+
+
+def rerank_results(query: str, results: list[dict], top_n: int = 5) -> list[dict]:
+    """
+    Same as rerank_documents but works on result dicts ({"content", "source", "score", ...})
+    so metadata such as the source filename survives reranking.
+    The reranker's own score is added as "rerank_score".
+    """
+    if not results:
+        return []
+
+    try:
+        ranker = _get_ranker()
+        passages = [{"id": i, "text": r["content"]} for i, r in enumerate(results)]
+        ranked = ranker.rerank(RerankRequest(query=query, passages=passages))
+
+        out = []
+        for res in ranked[:top_n]:
+            item = dict(results[int(res["id"])])
+            item["rerank_score"] = float(res.get("score", 0.0))
+            out.append(item)
+        return out
+
+    except Exception as e:
+        logfire.error(f"❌ [Reranker] Semantic Reranking Failed: {e}")
+        # Fall back to the original Qdrant order so the user still gets an answer
+        return results[:top_n]

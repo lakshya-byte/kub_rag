@@ -6,7 +6,7 @@ import remarkGfm from "remark-gfm";
 import { Check, Copy } from "lucide-react";
 import Citation from "./Citation";
 
-/** Turn `[n]` into `[n](#cite-n)` outside of code so we can render chips. */
+/** Turn footnote-style `[^n]` markers into `[n](#cite-n)` outside of code so we can render chips. */
 function withCitations(text: string, max: number): string {
   if (max <= 0) return text;
   let head = text;
@@ -21,7 +21,7 @@ function withCitations(text: string, max: number): string {
     .map((part, i) =>
       i % 2 === 1
         ? part
-        : part.replace(/\[(\d{1,2})\](?!\()/g, (m, d) => (+d >= 1 && +d <= max ? `[${d}](#cite-${d})` : m)),
+        : part.replace(/\[\^(\d{1,2})\]/g, (m, d) => (+d >= 1 && +d <= max ? `[${d}](#cite-${d})` : m)),
     )
     .join("");
   return converted + tail;

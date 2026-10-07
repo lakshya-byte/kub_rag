@@ -10,7 +10,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import logfire
-logfire.configure(token=os.getenv("LOGFIRE_TOKEN"), service_name="evals")
+logfire.configure(
+    token=os.getenv("LOGFIRE_TOKEN"),
+    service_name="evals",
+    send_to_logfire="if-token-present",  # evals must run even without a Logfire token
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 import asyncio
@@ -23,7 +27,8 @@ nest_asyncio.apply()
 
 from evals.pipeline import run_pipeline, load_golden_dataset
 from evals.guardrails_eval import run_guardrails_eval, compute_guardrails_metrics
-from evals.metrics import run_all_metrics
+# evals.metrics (ragas) is imported lazily inside the metrics handler: it is heavy and
+# version-sensitive, and must not stop the other tabs from working.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -73,13 +78,14 @@ def _color_score(val):
 def _render_metric_table(df: pd.DataFrame, metric_col: str, title: str):
     avg = df[metric_col].mean()
     st.markdown(f"**{title}** — AVG: {_badge(avg)} `{avg:.2f}` {_grade(avg)}")
-    styled = df.style.applymap(_color_score, subset=[metric_col]).format({metric_col: "{:.3f}"})
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    styled = df.style.map(_color_score, subset=[metric_col]).format({metric_col: "{:.3f}"})
+    st.dataframe(styled, width="stretch", hide_index=True)
 
 
 def _run_async(coro):
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(coro)
+    # asyncio.get_event_loop() raises on Python 3.14 when no loop exists.
+    # nest_asyncio.apply() (above) lets asyncio.run work inside Streamlit.
+    return asyncio.run(coro)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,8 +143,9 @@ with tab1:
             "Expected Tool": s["expected_tools"][0] if s["expected_tools"] else "—",
         })
     df_golden = pd.DataFrame(rag_rows)
-    st.dataframe(df_golden, use_container_width=True, hide_index=True)
-    st.caption(f"✅ {len(rag_rows)} golden RAG samples from 5 enterprise docs")
+    st.dataframe(df_golden, width="stretch", hide_index=True)
+    n_domains = len({s_["domain"] for s_ in golden["rag_samples"]})
+    st.caption(f"✅ {len(rag_rows)} golden RAG samples across {n_domains} topics")
 
     st.divider()
 
@@ -158,8 +165,10 @@ with tab1:
             "Type": g["type"],
             "Description": g["description"],
         })
-    st.dataframe(pd.DataFrame(g_rows), use_container_width=True, hide_index=True)
-    st.caption("6 guardrails test cases: 3 adversarial (should block) + 3 legit (should pass)")
+    st.dataframe(pd.DataFrame(g_rows), width="stretch", hide_index=True)
+    n_block = sum(1 for g in golden["guardrails_samples"] if g["expected_blocked"])
+    n_pass = len(golden["guardrails_samples"]) - n_block
+    st.caption(f"{len(golden['guardrails_samples'])} guardrails test cases: {n_block} adversarial (should block) + {n_pass} legit (should pass)")
 
     with st.expander("View raw golden_dataset.json"):
         st.json(golden)
@@ -173,7 +182,7 @@ with tab2:
     st.markdown(
         "Sends each golden question to your **running FastAPI app** (`localhost:8000/query`). "
         "Captures the actual response, retrieved contexts, and tool called. "
-        "Responses are truncated to 300 chars to save tokens for the RAGAS judging step."
+        "Full answers are kept (no truncation) so the judge scores what users actually see."
     )
     st.info(
         "⚠️ Make sure your FastAPI backend is running first: `uvicorn app.main:app --reload --port 8000`",
@@ -217,12 +226,12 @@ with tab2:
                 st.session_state.pipeline_rows.append({
                     "#": i + 1,
                     "Question": short_q,
-                    "Live Response (truncated)": short_r if short_r else "⚠️ No response",
+                    "Live Response": short_r if short_r else "⚠️ No response",
                     "Status": "✅" if short_r else "❌",
                 })
                 live_table_slot.dataframe(
                     pd.DataFrame(st.session_state.pipeline_rows),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
                 progress_bar.progress(
@@ -262,16 +271,19 @@ with tab2:
             result_label = {
                 "TP": "🛡️ Blocked ✅", "TN": "✅ Passed ✅",
                 "FP": "🛡️ Blocked ❌ (False Positive)", "FN": "✅ Passed ❌ (Missed)",
+                "ERROR": "⚠️ Error (not scored)",
             }.get(r["result"], r["result"])
             g_rows_live.append({
                 "ID": r["id"],
                 "Input": r["input"][:70],
                 "Expected": "🛡️ Block" if r["expected_blocked"] else "✅ Pass",
-                "Actual": "Blocked" if r["actual_blocked"] else "Passed",
+                "Actual": "Error" if r["actual_blocked"] is None else ("Blocked" if r["actual_blocked"] else "Passed"),
                 "Result": result_label,
             })
-        st.dataframe(pd.DataFrame(g_rows_live), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(g_rows_live), width="stretch", hide_index=True)
 
+        if g_metrics["errors"]:
+            st.error(f"{g_metrics['errors']} guardrail test(s) failed to run (API error) and were NOT scored.")
         mc1, mc2, mc3, mc4 = st.columns(4)
         mc1.metric("Correct", f"{g_metrics['correct']}/{g_metrics['total']}")
         mc2.metric("Precision", f"{g_metrics['precision']:.2f}")
@@ -291,7 +303,7 @@ with tab2:
                 "Tool Called": s["actual_tools_called"][0] if s.get("actual_tools_called") else "—",
                 "Contexts Retrieved": len(s.get("actual_contexts", [])),
             })
-        st.dataframe(pd.DataFrame(resp_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(resp_rows), width="stretch", hide_index=True)
 
         if st.session_state.guardrails_results:
             st.divider()
@@ -301,14 +313,17 @@ with tab2:
                 result_label = {
                     "TP": "🛡️ Blocked ✅", "TN": "✅ Passed ✅",
                     "FP": "Blocked ❌ FP", "FN": "Passed ❌ FN",
+                    "ERROR": "⚠️ Error (not scored)",
                 }.get(r["result"], r["result"])
                 g_rows_prev.append({
                     "ID": r["id"],
                     "Input": r["input"][:70],
                     "Result": result_label,
                 })
-            st.dataframe(pd.DataFrame(g_rows_prev), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(g_rows_prev), width="stretch", hide_index=True)
             gm = compute_guardrails_metrics(st.session_state.guardrails_results)
+            if gm["errors"]:
+                st.error(f"{gm['errors']} guardrail test(s) failed to run (API error) and were NOT scored.")
             mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric("Correct", f"{gm['correct']}/{gm['total']}")
             mc2.metric("Precision", f"{gm['precision']:.2f}")
@@ -327,13 +342,11 @@ with tab3:
     else:
         st.markdown(
             "Runs all **6 metric experiments** on the stored responses. "
-            "LLM-based metrics use `JUDGE_GROQ` key — samples are scored one at a time "
-            "with 40s cooldowns between samples to stay within Groq's **6,000 TPM** on-demand limit. "
-            "Total runtime: ~50 min."
+            "LLM-based metrics use the `JUDGE_GROQ` key. Calls run with limited concurrency and "
+            "automatically retry with exponential backoff when Groq rate-limits them."
         )
         st.info(
-            "Token key used: `JUDGE_GROQ` (separate from production key). "
-            "Each sample is processed individually (~2,800 tokens/burst) to avoid the 6,000 TPM ceiling.",
+            "Token key used: `JUDGE_GROQ` (separate from the production key; the run stops if it is not set).",
             icon="ℹ️",
         )
 
@@ -362,6 +375,8 @@ with tab3:
                 status_slot.info(msg)
 
             with logfire.span("📊 Streamlit — Run Metrics Button"):
+                from evals.metrics import run_all_metrics
+
                 metric_results = _run_async(
                     run_all_metrics(st.session_state.enriched_dataset, status_cb=status_cb)
                 )
@@ -424,4 +439,4 @@ with tab3:
                 {"Metric": name, "Score": f"{score:.3f}" if pd.notna(score) else "—", "Grade": _grade(score) if pd.notna(score) else "—"}
                 for name, score in summary
             ])
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            st.dataframe(summary_df, width="stretch", hide_index=True)

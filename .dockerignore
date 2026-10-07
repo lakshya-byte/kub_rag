@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.git
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.deepeval
+*.db
+processed_data
+DATA
+evals
+tests
+frontend
+*.html

@@ -90,6 +90,7 @@ export default function MessageView({
   const [draft, setDraft] = useState(message.content);
   const [copied, setCopied] = useState(false);
   const [hl, setHl] = useState<number | null>(null);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
   const { text, done } = useTypewriter(message.content, !!message.fresh && !isUser, onTyping);
 
   useEffect(() => {
@@ -97,8 +98,13 @@ export default function MessageView({
   }, [done, message, onTyped]);
 
   const jump = (n: number) => {
+    setSourcesOpen(true);
     setHl(n);
-    document.getElementById(`${message.id}-src-${n}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    // The cards only mount once the dropdown opens, so wait for that before scrolling.
+    setTimeout(
+      () => document.getElementById(`${message.id}-src-${n}`)?.scrollIntoView({ behavior: "smooth", block: "center" }),
+      sourcesOpen ? 0 : 280,
+    );
     setTimeout(() => setHl(null), 2500);
   };
 
@@ -120,7 +126,10 @@ export default function MessageView({
               className="card w-full resize-none rounded-2xl p-4 text-[15px] outline-none focus:border-accent/50"
             />
             <div className="flex justify-end gap-2 text-sm">
-              <button onClick={() => setEditing(false)} className="rounded-full px-3 py-1.5 text-ink-soft hover:bg-line/60">
+              <button
+                onClick={() => setEditing(false)}
+                className="rounded-full px-3 py-1.5 text-ink-soft hover:bg-line/60"
+              >
                 Cancel
               </button>
               <button
@@ -190,7 +199,14 @@ export default function MessageView({
           {done && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
               {message.sources && message.sources.length > 0 && (
-                <Sources sources={message.sources} idPrefix={message.id} highlight={hl} />
+                <Sources
+                  sources={message.sources}
+                  meta={message.sourceMeta}
+                  idPrefix={message.id}
+                  highlight={hl}
+                  open={sourcesOpen}
+                  onToggle={() => setSourcesOpen((o) => !o)}
+                />
               )}
               <div className="-ml-2 flex items-center gap-0.5">
                 <IconButton

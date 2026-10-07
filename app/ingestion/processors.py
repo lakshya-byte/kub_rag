@@ -30,6 +30,28 @@ qdrant_client = QdrantClient(
     api_key=settings.QDRANT_API_KEY,
 )
 
+# Fixed namespace so the same (source, chunk) always maps to the same point ID.
+# Re-running ingestion then overwrites points instead of creating duplicates.
+POINT_NAMESPACE = uuid.UUID("3b1f7a52-6c1e-4d0b-9a55-2f7c8d9e1a10")
+
+# Qdrant rejects very large requests, so upsert in batches.
+UPSERT_BATCH_SIZE = 200
+
+
+def point_id(source: str, chunk: str) -> str:
+    """Deterministic point ID derived from the source filename and chunk text."""
+    return str(uuid.uuid5(POINT_NAMESPACE, f"{source}\n{chunk}"))
+
+
+def source_type_from_name(name: str, default: str) -> str:
+    """Map a folder name to a source type: 'true' / 'noisy' by keyword, otherwise `default`."""
+    lowered = name.lower()
+    if "true" in lowered:
+        return "true"
+    if "noisy" in lowered:
+        return "noisy"
+    return default
+
 
 def save_processed_locally(data: dict, source_type: str, filename: str) -> str:
     """
@@ -103,10 +125,11 @@ def process_file(file_path: str, filename: str, source_type: str):
 
     Returns
     -------
-    None
-        The function writes side-effects to disk and Qdrant. It does not return a
-        value. On unrecoverable errors the exception is caught, logged, and execution
-        continues to allow batch processing to proceed.
+    str
+        "indexed" when the file's chunks were written to Qdrant, "skipped" when the file
+        type is unsupported or no text/chunks were produced, and "failed" when an error
+        occurred (it is logged, and the caller decides how to report it so one bad file
+        does not stop the batch but is never silently lost).
     """
     with logfire.span("Processing File", file=filename, source=source_type):
         try:
@@ -122,16 +145,16 @@ def process_file(file_path: str, filename: str, source_type: str):
                 full_text = parse_office(file_path)
             else:
                 logfire.warning(f"Skipping unsupported file type: {filename}")
-                return
+                return "skipped"
 
             if not full_text or not full_text.strip():
                 logfire.warning(f"No text extracted from {filename} — skipping.")
-                return
+                return "skipped"
 
             # 2. Chunk text
             chunks = chunk_text(full_text)
             if not chunks:
-                return
+                return "skipped"
 
             # 3. Save processed metadata locally
             processed_data = {
@@ -145,9 +168,12 @@ def process_file(file_path: str, filename: str, source_type: str):
             # 4. Embed and index in Qdrant
             with logfire.span("Vectorizing & Indexing"):
                 embeddings = embed_texts(chunks)
-                points = [
-                    models.PointStruct(
-                        id=str(uuid.uuid4()),
+                # Deterministic IDs: identical (source, chunk) pairs collapse into one point.
+                points = {}
+                for chunk, vector in zip(chunks, embeddings):
+                    pid = point_id(filename, chunk)
+                    points[pid] = models.PointStruct(
+                        id=pid,
                         vector=vector,
                         payload={
                             "text": chunk,
@@ -155,51 +181,54 @@ def process_file(file_path: str, filename: str, source_type: str):
                             "source_type": source_type,
                         },
                     )
-                    for chunk, vector in zip(chunks, embeddings)
-                ]
+                batch = list(points.values())
 
-                qdrant_client.upsert(
-                    collection_name=settings.QDRANT_COLLECTION_NAME,
-                    points=points,
-                )
-                logfire.info(f"Indexed {len(points)} points to Qdrant from {filename}.")
+                for i in range(0, len(batch), UPSERT_BATCH_SIZE):
+                    qdrant_client.upsert(
+                        collection_name=settings.QDRANT_COLLECTION_NAME,
+                        points=batch[i : i + UPSERT_BATCH_SIZE],
+                    )
+                logfire.info(f"Indexed {len(batch)} points to Qdrant from {filename}.")
+
+            return "indexed"
 
         except Exception as e:
             logfire.error(f"Failed to process {filename}: {e}")
+            return "failed"
 
 
-def process_directory(dir_path: str, source_type: str):
+def process_directory(dir_path: str, source_type: str) -> dict:
     """
-    Iterates over every file in a given directory and runs the full ingestion pipeline
-    on each one by delegating to `process_file`.
+    Ingest every file under `dir_path` (recursively, skipping hidden files and folders)
+    by delegating each one to `process_file`.
 
-    The function performs a flat (non-recursive) scan of `dir_path`, collecting all
-    direct children that are regular files. Sub-directories are ignored at this level;
-    recursive directory traversal is handled by `run_universal_ingestion` instead.
-
-    Each file is processed independently so that a failure in one document does not
-    interrupt the ingestion of remaining files in the same directory.
-
-    Parameters
-    ----------
-    dir_path : str
-        Path to the directory whose files should be ingested. The path must exist and
-        be readable; no validation is performed inside this function.
-    source_type : str
-        A category label forwarded to `process_file` and ultimately attached to every
-        vector point written to Qdrant, enabling source-based filtering at query time.
+    Each file is processed independently so a failure in one document does not stop
+    the others, but failures are collected and returned so the caller can report them.
 
     Returns
     -------
-    None
-        All output is produced as side-effects (local JSON files and Qdrant upserts).
-        Progress and errors are emitted through logfire spans and log statements.
+    dict
+        {"indexed": int, "skipped": int, "failed": [relative paths of failed files]}
     """
+    report = {"indexed": 0, "skipped": 0, "failed": []}
     with logfire.span("Scanning Directory", path=dir_path, source=source_type):
-        files = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f))]
-        logfire.info(f"Found {len(files)} files in {dir_path}.")
-        for filename in files:
-            process_file(os.path.join(dir_path, filename), filename, source_type)
+        found = []
+        for root, dirs, names in os.walk(dir_path):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for name in sorted(names):
+                if not name.startswith("."):
+                    found.append(os.path.join(root, name))
+        logfire.info(f"Found {len(found)} files in {dir_path}.")
+
+        for path in found:
+            result = process_file(path, os.path.basename(path), source_type)
+            if result == "indexed":
+                report["indexed"] += 1
+            elif result == "failed":
+                report["failed"].append(os.path.relpath(path, dir_path))
+            else:
+                report["skipped"] += 1
+    return report
 
 
 def run_universal_ingestion(base_dir: str, explicit_source_type: str = None, wipe: bool = False):
@@ -257,8 +286,8 @@ def run_universal_ingestion(base_dir: str, explicit_source_type: str = None, wip
                     logfire.info(f"Collection '{settings.QDRANT_COLLECTION_NAME}' deleted.")
 
         # Recreate collection — dimension resolved at runtime after embedding model probe
+        dim = get_embedding_dim()
         if not qdrant_client.collection_exists(settings.QDRANT_COLLECTION_NAME):
-            dim = get_embedding_dim()
             qdrant_client.create_collection(
                 collection_name=settings.QDRANT_COLLECTION_NAME,
                 vectors_config=models.VectorParams(
@@ -270,39 +299,59 @@ def run_universal_ingestion(base_dir: str, explicit_source_type: str = None, wip
                 f"Created collection '{settings.QDRANT_COLLECTION_NAME}' "
                 f"({dim}-dim, Cosine)."
             )
-
-        # Route to sub-folders or treat the whole dir as one source
-        subdirs = [
-            d for d in os.listdir(base_dir)
-            if os.path.isdir(os.path.join(base_dir, d))
-        ]
-
-        if not subdirs:
-            if explicit_source_type:
-                source_type = explicit_source_type
-            else:
-                base_name = os.path.basename(os.path.normpath(base_dir)).lower()
-                source_type = (
-                    "true" if "true" in base_name
-                    else "noisy" if "noisy" in base_name
-                    else "general"
-                )
-            logfire.info(f"No sub-folders found — processing '{base_dir}' as '{source_type}'.")
-            process_directory(base_dir, source_type)
         else:
-            for subdir in subdirs:
-                source_type = (
-                    "true" if "true" in subdir.lower()
-                    else "noisy" if "noisy" in subdir.lower()
-                    else subdir
+            # An existing collection must match the embedding model's vector size.
+            existing = qdrant_client.get_collection(settings.QDRANT_COLLECTION_NAME).config.params.vectors.size
+            if existing != dim:
+                raise RuntimeError(
+                    f"Collection '{settings.QDRANT_COLLECTION_NAME}' has {existing}-dim vectors but the "
+                    f"embedding model produces {dim}-dim. Re-run with --wipe to rebuild it."
                 )
-                process_directory(os.path.join(base_dir, subdir), source_type)
+
+        total = {"indexed": 0, "skipped": 0, "failed": []}
+
+        def merge(report: dict, label: str = ""):
+            total["indexed"] += report["indexed"]
+            total["skipped"] += report["skipped"]
+            total["failed"] += [os.path.join(label, f) for f in report["failed"]]
+
+        entries = sorted(e for e in os.listdir(base_dir) if not e.startswith("."))
+        subdirs = [d for d in entries if os.path.isdir(os.path.join(base_dir, d))]
+        loose_files = [f for f in entries if os.path.isfile(os.path.join(base_dir, f))]
+
+        if explicit_source_type:
+            # An explicit label applies to every file under base_dir, however it is nested.
+            logfire.info(f"Processing '{base_dir}' as '{explicit_source_type}'.")
+            merge(process_directory(base_dir, explicit_source_type))
+        else:
+            base_name = os.path.basename(os.path.normpath(base_dir))
+            if loose_files:
+                # Files sitting directly in base_dir (not in a sub-folder) must not be dropped.
+                source_type = source_type_from_name(base_name, "general")
+                logfire.info(f"Processing {len(loose_files)} top-level files as '{source_type}'.")
+                for name in loose_files:
+                    result = process_file(os.path.join(base_dir, name), name, source_type)
+                    if result == "indexed":
+                        total["indexed"] += 1
+                    elif result == "failed":
+                        total["failed"].append(name)
+                    else:
+                        total["skipped"] += 1
+            for subdir in subdirs:
+                source_type = source_type_from_name(subdir, subdir)
+                merge(process_directory(os.path.join(base_dir, subdir), source_type), subdir)
+
+        logfire.info(
+            f"Ingestion summary: {total['indexed']} files indexed, {total['skipped']} skipped, "
+            f"{len(total['failed'])} failed."
+        )
+        return total
 
 
 if __name__ == "__main__":
     # Usage:
-    #   python -m app.ingestion.processor DATA --wipe
-    #   python -m app.ingestion.processor DATA/true_data true
+    #   python -m app.ingestion.processors DATA --wipe
+    #   python -m app.ingestion.processors DATA/true_data true
     wipe_requested = "--wipe" in sys.argv
     clean_args = [a for a in sys.argv if a != "--wipe"]
 
@@ -313,7 +362,14 @@ if __name__ == "__main__":
         print(f"Error: path '{target_dir}' does not exist.")
         sys.exit(1)
 
-    run_universal_ingestion(target_dir, explicit_source_type=explicit_type, wipe=wipe_requested)
+    summary = run_universal_ingestion(target_dir, explicit_source_type=explicit_type, wipe=wipe_requested)
+    print(
+        f"Ingestion finished: {summary['indexed']} indexed, {summary['skipped']} skipped, "
+        f"{len(summary['failed'])} failed."
+    )
+    if summary["failed"]:
+        print("Failed files:")
+        for name in summary["failed"]:
+            print(f"  - {name}")
+        sys.exit(1)
     logfire.info("Ingestion job completed.")
-
-

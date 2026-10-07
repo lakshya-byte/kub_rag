@@ -7,6 +7,8 @@ export type ChatMessage = {
   thought?: string[];
   status?: string;
   sources?: string[];
+  /** filename + score per source, same order as `sources` */
+  sourceMeta?: { source: string; score: number }[];
   error?: boolean;
   /** play the typing reveal once, for freshly received answers (never persisted) */
   fresh?: boolean;

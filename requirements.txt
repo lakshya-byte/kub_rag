@@ -9,6 +9,7 @@ python-dotenv               # For loading configuration from .env files
 requests                    # HTTP library for internal/external API calls
 streamlit                   # Frontend dashboard for the chat interface
 numpy                       # Numerical processing
+pandas                      # Eval result tables (evals/app.py)
 pytz                        # Timezone handling for logs
 nest-asyncio                # Support for nested async loops in notebooks/streamlit
 
@@ -22,9 +23,10 @@ flashrank                   # Ultra-fast local cross-encoder for semantic rerank
 # --- LANGCHAIN & AGENTIC ORCHESTRATION ---
 langchain                   # Core LLM orchestration
 langgraph                   # State-machine logic for cyclic agent flows
-langchain-groq              # Integration for lightning-fast Llama 3.3 models
+langgraph-checkpoint-sqlite # Durable conversation memory (chat_memory.db)
+langchain-groq              # Integration for lightning-fast gpt-oss models
 langchain-google-vertexai   # Required shim for NeMo Guardrails internal import (no GCP credentials needed)
-langchain-community         # Community-contributed tools and loaders
+langchain-community<0.4     # <0.4: ragas 0.4.x imports langchain_community.chat_models.vertexai, removed in 0.4
 pydantic>=2.0.0             # Data validation and settings management
 
 # --- DATA INGESTION & DOCUMENT PARSING ---
@@ -54,5 +56,3 @@ langfuse                    # Live production monitoring, tracing & user feedbac
 
 # --- EMBEDDINGS (SENTENCE TRANSFORMERS) ---
 sentence-transformers       # Used by FlashRank reranker internally
-
-langchain-google-vertexai

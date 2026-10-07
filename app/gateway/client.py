@@ -2,11 +2,14 @@ import logfire
 from portkey_ai import Portkey, createHeaders, PORTKEY_GATEWAY_URL
 from langchain_openai import ChatOpenAI
 
-from app.config import settings
+from app.config import require, settings
+
+# Fail fast: without these the gateway builds model names like '@None/...' and every call 401s.
+require("PORTKEY_API_KEY", "GROQ_SLUG", "GROQ_SLUG_2")
 
 
 # Production gateway config:
-#   - Fallback: primary @rag/llama-3.3-70b-versatile → @brag/llama-3.1-8b-instant on failure
+#   - Fallback: primary @rag/openai/gpt-oss-120b → @brag/openai/gpt-oss-120b on failure
 #   - Cache: semantic mode (requires Portkey Enterprise — silently falls back to simple on free/starter)
 #   - Retry: 2 attempts on rate limit / server error before triggering the fallback target
 
@@ -18,14 +21,18 @@ GATEWAY_CONFIG = {
         "on_status_codes": [429, 503]
     },
     "targets": [
-        {"override_params": {"model": f"@{settings.GROQ_SLUG}/llama-3.3-70b-versatile"}},
-        {"override_params": {"model": f"@{settings.GROQ_SLUG_2}/llama-3.1-8b-instant"}},
+        {"override_params": {"model": f"@{settings.GROQ_SLUG}/openai/gpt-oss-120b"}},
+        {"override_params": {"model": f"@{settings.GROQ_SLUG_2}/openai/gpt-oss-120b"}},
     ]
 }
 
+# Prefer a config saved in the Portkey dashboard (PORTKEY_CONFIG=pc-...); inline configs are
+# rejected by workspaces that disable them ("Reference a saved config by its 'pc-...' slug").
+ACTIVE_CONFIG = settings.PORTKEY_CONFIG or GATEWAY_CONFIG
+
 portkey_client = Portkey(
     api_key=settings.PORTKEY_API_KEY,
-    config=GATEWAY_CONFIG
+    config=ACTIVE_CONFIG
 )
 
 
@@ -43,11 +50,11 @@ def get_langchain_llm(feature: str = "rag") -> ChatOpenAI:
     return ChatOpenAI(
         api_key=settings.PORTKEY_API_KEY,
         base_url=PORTKEY_GATEWAY_URL,
-        model=f"@{settings.GROQ_SLUG}/llama-3.3-70b-versatile",
+        model=f"@{settings.GROQ_SLUG}/openai/gpt-oss-120b",
         temperature=0,
         default_headers=createHeaders(
             api_key=settings.PORTKEY_API_KEY,
-            config=GATEWAY_CONFIG,
+            config=ACTIVE_CONFIG,
             metadata={
                 "feature": feature,
                 "_user": "rag-system",
@@ -58,13 +65,15 @@ def get_langchain_llm(feature: str = "rag") -> ChatOpenAI:
 
 def extract_cache_status(response) -> str:
     """
-    Pull x-portkey-cache-status from the Portkey native client response headers.
-    Tries multiple attribute paths defensively — returns 'MISS' if not found.
+    Read the Portkey cache status ('HIT' / 'MISS' / 'DISABLED') from a chat completion.
+
+    The Portkey SDK exposes response headers through get_headers(), which returns only the
+    x-portkey-* headers with that prefix removed, so the cache header is keyed 'cache-status'.
+    Returns 'MISS' when the header is absent.
     """
-    for attr in ("_raw_response", "_response", "_http_response"):
-        raw = getattr(response, attr, None)
-        if raw is not None:
-            status = getattr(raw, "headers", {}).get("x-portkey-cache-status", "")
-            if status:
-                return status.upper()
-    return "MISS"
+    try:
+        headers = response.get_headers() or {}
+    except Exception:
+        headers = {}
+    status = headers.get("cache-status") or headers.get("x-portkey-cache-status") or ""
+    return status.upper() if status else "MISS"

@@ -18,6 +18,8 @@ __pycache__/
 
 # ── Generated / local data ──────────────────────────────
 processed_data/
+chat_memory.db*
+*.db
 .flashrank/
 # Uncomment if the corpus is large or shouldn't be shared:
 # DATA/

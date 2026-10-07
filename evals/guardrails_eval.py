@@ -7,10 +7,11 @@ Classifies each result as TP / TN / FP / FN and computes precision + recall.
 
 import time
 import copy
+import uuid
 import requests
 import logfire
 
-API_URL = "http://localhost:8000/query"
+from evals.config import API_URL
 
 
 def _is_blocked(response_json: dict) -> bool:
@@ -26,6 +27,7 @@ def run_guardrails_eval(guardrails_samples: list, progress_callback=None) -> lis
     """
     samples = copy.deepcopy(guardrails_samples)
     n = len(samples)
+    run_id = uuid.uuid4().hex[:8]   # fresh server-side conversation for every sample and run
 
     with logfire.span("🛡️ Eval — Guardrails Tests", total=n):
         for i, sample in enumerate(samples):
@@ -40,19 +42,22 @@ def run_guardrails_eval(guardrails_samples: list, progress_callback=None) -> lis
                 try:
                     resp = requests.post(
                         API_URL,
-                        json={"q": sample["input"], "thread_id": f"guardrail_eval_{i}"},
+                        json={"q": sample["input"], "thread_id": f"guardrail_eval_{run_id}_{i}"},
                         timeout=30,
                     )
                     resp.raise_for_status()
-                    blocked = _is_blocked(resp.json())
-
-                except requests.exceptions.ConnectionError:
-                    logfire.error("❌ Cannot reach FastAPI — is the app running on :8000?")
-                    blocked = False
+                    data = resp.json()
+                    if data.get("status") == "error":
+                        raise RuntimeError("API returned an error response")
+                    blocked = _is_blocked(data)
 
                 except Exception as e:
-                    logfire.error(f"❌ Guardrails test error: {e}")
-                    blocked = False
+                    # A failed request is NOT a prediction: never score it as a pass or a block.
+                    logfire.error(f"❌ Guardrails test error (not scored): {e}")
+                    sample["actual_blocked"] = None
+                    sample["result"] = "ERROR"
+                    time.sleep(2)
+                    continue
 
                 expected = sample["expected_blocked"]
                 sample["actual_blocked"] = blocked
@@ -79,22 +84,25 @@ def run_guardrails_eval(guardrails_samples: list, progress_callback=None) -> lis
 
 
 def compute_guardrails_metrics(results: list) -> dict:
-    tp = sum(1 for r in results if r["result"] == "TP")
-    tn = sum(1 for r in results if r["result"] == "TN")
-    fp = sum(1 for r in results if r["result"] == "FP")
-    fn = sum(1 for r in results if r["result"] == "FN")
+    """Precision / recall / accuracy over the *scored* results. ERROR results are excluded and counted."""
+    errors = sum(1 for r in results if r["result"] == "ERROR")
+    scored = [r for r in results if r["result"] != "ERROR"]
+
+    tp = sum(1 for r in scored if r["result"] == "TP")
+    tn = sum(1 for r in scored if r["result"] == "TN")
+    fp = sum(1 for r in scored if r["result"] == "FP")
+    fn = sum(1 for r in scored if r["result"] == "FN")
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    accuracy  = (tp + tn) / len(results) if results else 0.0
+    accuracy  = (tp + tn) / len(scored) if scored else 0.0
 
     return {
         "tp": tp, "tn": tn, "fp": fp, "fn": fn,
         "precision": round(precision, 3),
         "recall": round(recall, 3),
         "accuracy": round(accuracy, 3),
-        "total": len(results),
+        "total": len(scored),
+        "errors": errors,
         "correct": tp + tn,
     }
-
-
