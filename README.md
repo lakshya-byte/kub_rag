@@ -84,6 +84,6 @@ Dockerfile, docker-compose.yml, requirements.api.txt   container setup (runtime-
 - **Old data:** chunks ingested before the chunking fixes may be duplicated or one line long. Re-ingest with `--wipe` to clean them, then tune `RETRIEVAL_MIN_SCORE` (default 0.2).
 - **Python versions:** Docker uses 3.13 because `unstructured` 0.27 does not support 3.14.
 - **Secrets:** `.env` is never copied into images. Rotate any key that has been shared or logged.
-- `nemoguardrails` in `requirements.txt` and `app/guardrails/colang_rules.py` are no longer used.
+- `app/guardrails/colang_rules.py` is a leftover from the old NeMo guardrails and is no longer used.
 
 Common errors (expired OpenAI key, missing Portkey slugs, model 404, `output_parse_failed`, CORS) are listed with fixes in the **Troubleshooting** chapter of `/docs`.
